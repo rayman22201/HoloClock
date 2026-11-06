@@ -676,6 +676,10 @@ class TFT_eSPI : public Print { friend class TFT_eSprite; // Sprite class has ac
   uint8_t  decoderState = 0;   // UTF8 decoder state        - not for user access
   uint16_t decoderBuffer;      // Unicode code-point buffer - not for user access
 
+           // Display variant settings (moved public for CGRAM offset access)
+  uint8_t  tabcolor,                   // ST7735 screen protector "tab" colour (now invalid)
+           colstart = 0, rowstart = 0; // Screen display area to CGRAM area coordinate offsets
+
  //--------------------------------------- private ------------------------------------//
  private:
            // Legacy begin and end prototypes - deprecated TODO: delete
@@ -710,10 +714,6 @@ class TFT_eSPI : public Print { friend class TFT_eSprite; // Sprite class has ac
 
            // Single GPIO input/output direction control
   void     gpioMode(uint8_t gpio, uint8_t mode);
-
-           // Display variant settings
-  uint8_t  tabcolor,                   // ST7735 screen protector "tab" colour (now invalid)
-           colstart = 0, rowstart = 0; // Screen display area to CGRAM area coordinate offsets
 
            // Port and pin masks for control signals (ESP826 only) - TODO: remove need for this
   volatile uint32_t *dcport, *csport;

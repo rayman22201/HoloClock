@@ -106,7 +106,7 @@ ImuAction *IMU::update(int interval)
                 action_info.isValid = 1;
                 action_info.active = ACTIVE_TYPE::TURN_RIGHT;
             }
-            else if (action_info.v_ay > 1000 || action_info.v_ay < -1000)
+            else if (action_info.v_ay > 3000 || action_info.v_ay < -3000)
             {
                 // 震动检测
                 encoder_diff--;
@@ -147,7 +147,7 @@ ImuAction *IMU::update(int interval)
                     encoder_state = LV_INDEV_STATE_REL;
                 }
             }
-            else if (action_info.v_ax > 1000 || action_info.v_ax < -1000)
+            else if (action_info.v_ax > 3000 || action_info.v_ax < -3000)
             {
                 // 震动检测
                 action_info.isValid = 1;
@@ -169,6 +169,10 @@ ImuAction *IMU::getAction(void)
     // 基本方法: 通过对近来的动作数据简单的分析，确定出动作的类型
     ImuAction tmp_info;
     getVirtureMotion6(&tmp_info);
+    // Propagate raw readings so callers can inspect them
+    action_info.v_ax = tmp_info.v_ax;
+    action_info.v_ay = tmp_info.v_ay;
+    action_info.v_az = tmp_info.v_az;
 
     // Serial.printf("gx = %d\tgy = %d\tgz = %d", tmp_info.v_gx, tmp_info.v_gy, tmp_info.v_gz);
     // Serial.printf("\tax = %d\tay = %d\taz = %d\n", tmp_info.v_ax, tmp_info.v_ay, tmp_info.v_az);
@@ -186,7 +190,7 @@ ImuAction *IMU::getAction(void)
         {
             tmp_info.active = ACTIVE_TYPE::TURN_RIGHT;
         }
-        else if (tmp_info.v_ay > 1000 || tmp_info.v_ay < -1000)
+        else if (tmp_info.v_ay > 3000 || tmp_info.v_ay < -3000)
         {
             // 震动检测
             tmp_info.active = ACTIVE_TYPE::SHAKE;
@@ -203,7 +207,7 @@ ImuAction *IMU::getAction(void)
         {
             tmp_info.active = ACTIVE_TYPE::DOWN;
         }
-        else if (action_info.v_ax > 1000 || action_info.v_ax < -1000)
+        else if (tmp_info.v_ax > 3000 || tmp_info.v_ax < -3000)
         {
             // 震动检测
             tmp_info.active = ACTIVE_TYPE::SHAKE;

@@ -10,6 +10,9 @@ static lv_disp_draw_buf_t disp_buf;
 static lv_disp_drv_t disp_drv;
 static lv_color_t buf[SCREEN_HOR_RES * LV_HOR_RES_MAX_LEN];
 
+// Set to 1 to enable software Y-flip (for debugging without hardware MADCTL flip)
+#define SOFTWARE_FLIP_Y 0
+
 void my_print(const char * buf)
 {
     Serial.printf("%s", buf);
@@ -21,13 +24,20 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
     uint32_t w = (area->x2 - area->x1 + 1);
     uint32_t h = (area->y2 - area->y1 + 1);
 
+#if SOFTWARE_FLIP_Y
+    lv_coord_t y_flip = (SCREEN_VER_RES - 1) - area->y2;
+    tft->setAddrWindow(area->x1, y_flip, w, h);
+    tft->startWrite();
+    for (int32_t row = h - 1; row >= 0; row--) {
+        tft->pushColors(&color_p[row * w].full, w, true);
+    }
+    tft->endWrite();
+#else
     tft->setAddrWindow(area->x1, area->y1, w, h);
     tft->startWrite();
-    // tft->writePixels(&color_p->full, w * h);
     tft->pushColors(&color_p->full, w * h, true);
     tft->endWrite();
-    // Initiate DMA - blocking only if last DMA is not complete
-    // tft->pushImageDMA(area->x1, area->y1, w, h, bitmap, &color_p->full);
+#endif
 
     lv_disp_flush_ready(disp);
 }

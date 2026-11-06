@@ -31,16 +31,23 @@ unsigned int Ambient::getLux()
     if (millis() - last_time > sample_time)
     {
         last_time = millis();
-        Wire.requestFrom(ADDRESS_BH1750FVI, 2); //ask Arduino to read back 2 bytes from the sensor
-        highByte = Wire.read();                 // get the high byte
-        lowByte = Wire.read();                  // get the low byte
+        // Wire.read() returns -1 (-> 0xFF) when no data arrived, so a dead
+        // sensor would read as ~54600 lux; only accept a complete, plausible reading
+        if (Wire.requestFrom(ADDRESS_BH1750FVI, 2) == 2)
+        {
+            highByte = Wire.read();                 // get the high byte
+            lowByte = Wire.read();                  // get the low byte
 
-        sensorOut = (highByte << 8) | lowByte;
-        illuminance = sensorOut / 1.2;
+            sensorOut = (highByte << 8) | lowByte;
+            if (sensorOut != 0xFFFF)
+            {
+                illuminance = sensorOut / 1.2;
 
-        for (int i = 4; i > 0; i--)
-            lux[i] = lux[i - 1];
-        lux[0] = illuminance;
+                for (int i = 4; i > 0; i--)
+                    lux[i] = lux[i - 1];
+                lux[0] = illuminance;
+            }
+        }
 
         Wire.beginTransmission(ADDRESS_BH1750FVI); //"notify" the matching device
         Wire.write(mMode);                         //set operation mode
