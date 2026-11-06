@@ -5,6 +5,7 @@
 #include "common.h"
 #define ARDUINOJSON_USE_LONG_LONG 1
 #include "ArduinoJson.h"
+#include "timezone_rules.h"
 
 #include <HTTPClient.h>
 
@@ -23,7 +24,7 @@ void update_time_status();
 WiFiUDP ntpUDP;
 const char* ntpServer = "us.pool.ntp.org";
 const long gmtOffset_sec = 0;
-int daylightOffset_sec = 0;
+static ClockTimezone clockTimezone;
 const char* timezoneServiceURL = "http://ip-api.com/json/?fields=status,timezone,offset";
 
 
@@ -122,15 +123,18 @@ void getTimezone(String* timezone, uint32_t timeoutMs, int maxAttempts)
         String payload = http.getString();
         Serial.print("Timezone API response: ");
         Serial.println(payload);
-        DynamicJsonDocument doc(512);
-        deserializeJson(doc, payload);
-        *timezone = doc["timezone"].as<String>();
-        int offsetSeconds = doc["offset"].as<int>();
-        daylightOffset_sec = offsetSeconds;
+        if (!clockTimezone.updateFromJson(payload.c_str()))
+        {
+            Serial.println("Invalid timezone response; keeping previous timezone.");
+            http.end();
+            request_count++;
+            continue;
+        }
+        *timezone = clockTimezone.name;
         Serial.print("time area:");
         Serial.println(*timezone);
-        Serial.print("time offset:");
-        Serial.println(daylightOffset_sec);
+        Serial.print("timezone rule:");
+        Serial.println(clockTimezone.rule);
         http.end();
         break;
       }
@@ -252,7 +256,7 @@ void set_focus_update(int v)
     {
         String timezone;
         getTimezone(&timezone, 5000, 5);
-        configTime(daylightOffset_sec, 0, ntpServer);
+        configTzTime(clockTimezone.rule, ntpServer);
         run_data->lastResyncMillis = millis();
         int retries = 0;
         while (time(nullptr) < TIME_VALID_EPOCH && retries < 15)
@@ -275,7 +279,7 @@ void set_focus_update(int v)
 
 void getTimeDebugJson(String* out)
 {
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<1024> doc;
 
     if (WiFi.status() == WL_CONNECTED)
         doc["wifi_status"] = "connected";
@@ -284,9 +288,16 @@ void getTimeDebugJson(String* out)
 
     doc["ip"] = WiFi.localIP().toString();
     doc["ntp_server"] = ntpServer;
-    doc["tz_offset_sec"] = daylightOffset_sec;
-
     time_t now = time(nullptr);
+    doc["tz_offset_sec"] = effectiveUtcOffset(now);
+    doc["timezone"] = clockTimezone.name;
+    doc["tz_rule"] = clockTimezone.rule;
+    struct tm local;
+    localtime_r(&now, &local);
+    char localTime[32];
+    strftime(localTime, sizeof(localTime), "%Y-%m-%d %H:%M:%S", &local);
+    doc["local_time"] = localTime;
+    doc["is_dst"] = local.tm_isdst > 0;
     doc["time_raw"] = (long)now;
     doc["time_valid"] = (now > 1700000000);
 
@@ -390,7 +401,7 @@ void update_time_status()
     {
         if (WL_CONNECTED == WiFi.status())
         {
-            configTime(daylightOffset_sec, 0, ntpServer);
+            configTzTime(clockTimezone.rule, ntpServer);
             run_data->lastResyncMillis = millis();
             Serial.println("Hourly NTP re-sync requested.");
         }
@@ -403,7 +414,7 @@ void update_time_status()
         {
             String timezone;
             getTimezone(&timezone, 2000, 2);
-            configTime(daylightOffset_sec, 0, ntpServer);
+            configTzTime(clockTimezone.rule, ntpServer);
             run_data->lastResyncMillis = millis();
             Serial.println("Daily timezone refresh done.");
         }
