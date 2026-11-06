@@ -1,0 +1,9 @@
+# Local service credentials and device configuration
+/tools/config.yaml
+/tools/credentials.json
+/tools/token.json
+
+# Generated diagnostics and Python bytecode
+/tools/*.jsonl
+__pycache__/
+*.pyc

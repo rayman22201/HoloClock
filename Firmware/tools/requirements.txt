@@ -1,0 +1,7 @@
+slack_sdk
+discord.py-self
+requests
+pyyaml
+icalendar
+google-api-python-client
+google-auth-oauthlib
