@@ -20,7 +20,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 import requests
@@ -75,13 +75,14 @@ class DeviceMonitor:
     def __init__(self, ip: str, port: int, poll_interval: int):
         self._url = f"http://{ip}:{port}/status"
         self._poll_interval = poll_interval
-        self._online = True
+        self._online: bool | None = None
+        self._checked_at: float | None = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     @property
-    def is_online(self) -> bool:
+    def is_online(self) -> bool | None:
         with self._lock:
             return self._online
 
@@ -89,9 +90,19 @@ class DeviceMonitor:
         with self._lock:
             prev = self._online
             self._online = state
+            self._checked_at = time.time()
         if state != prev:
             label = "online" if state else "offline"
             log.info("[monitor] Device is now %s", label)
+
+    def health(self, now: float | None = None) -> dict:
+        with self._lock:
+            checked_at, online = self._checked_at, self._online
+        now = time.time() if now is None else now
+        age = max(0, now - checked_at) if checked_at is not None else None
+        return {"enabled": True, "worker_alive": bool(self._thread and self._thread.is_alive()),
+                "online": online, "checked_at": checked_at, "age_seconds": age,
+                "stale": age is None or age > max(30, 3 * self._poll_interval + 3)}
 
     def _run(self) -> None:
         log.info("[monitor] Started (polling %s every %ds)", self._url, self._poll_interval)
@@ -133,13 +144,47 @@ class Source:
         self._last_notify = 0.0
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._health_lock = threading.Lock()
+        self._state = "starting"
+        self._error_type: str | None = None
+
+    def _mark_ready(self) -> None:
+        with self._health_lock:
+            self._state, self._error_type = "ready", None
+
+    def _mark_error(self, error: Exception) -> None:
+        with self._health_lock:
+            self._state, self._error_type = "error", type(error).__name__
+        log.error("[%s] Worker error: %s", self.name, type(error).__name__)
+
+    def _worker_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    def health(self) -> dict:
+        alive = self._worker_alive()
+        with self._health_lock:
+            state, error_type = self._state, self._error_type
+        if not alive and state == "ready":
+            state = "stopped"
+        return {"worker_alive": alive, "state": state, "error_type": error_type}
+
+    def _run_guarded(self) -> None:
+        try:
+            self._run()
+        except Exception as error:
+            self._mark_error(error)
+        finally:
+            with self._health_lock:
+                if self._state != "error":
+                    self._state = "stopped"
 
     def _notify(self, duration_ms: int = 0) -> bool:
         now = time.time()
-        if self.cooldown and now - self._last_notify < self.cooldown:
-            log.debug("[%s] Cooldown active, skipping", self.name)
-            return False
-        self._last_notify = now
+        with self._health_lock:
+            if self.cooldown and now - self._last_notify < self.cooldown:
+                log.debug("[%s] Cooldown active, skipping", self.name)
+                return False
+            self._last_notify = now
         return self.dispatcher(
             source=self.source_char,
             color=self.color,
@@ -151,7 +196,9 @@ class Source:
 
     def start(self) -> None:
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name=f"src-{self.name}", daemon=True)
+        with self._health_lock:
+            self._state, self._error_type = "starting", None
+        self._thread = threading.Thread(target=self._run_guarded, name=f"src-{self.name}", daemon=True)
         self._thread.start()
         log.info("[%s] Started", self.name)
 
@@ -308,6 +355,7 @@ class SlackSource(Source):
         )
         sm_client.socket_mode_request_listeners.append(self._handle_event)
         sm_client.connect()
+        self._mark_ready()
         log.info("[slack] Connected via Socket Mode")
 
         self._stop_event.wait()
@@ -319,6 +367,13 @@ class SlackSource(Source):
 
 class DiscordSource(Source):
     name = "discord"
+
+    def __init__(self, cfg: dict, dispatcher):
+        super().__init__(cfg, dispatcher)
+        self._bot_thread: threading.Thread | None = None
+
+    def _worker_alive(self) -> bool:
+        return super()._worker_alive() and bool(self._bot_thread and self._bot_thread.is_alive())
 
     def _run(self) -> None:
         import asyncio
@@ -332,6 +387,7 @@ class DiscordSource(Source):
 
         @client.event
         async def on_ready():
+            self._mark_ready()
             log.info("[discord] Logged in as %s", client.user)
 
         @client.event
@@ -361,13 +417,24 @@ class DiscordSource(Source):
 
         def run_bot():
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(client.start(cfg["token"]))
+            try:
+                loop.run_until_complete(client.start(cfg["token"]))
+            except Exception as error:
+                self._mark_error(error)
+            finally:
+                try:
+                    loop.run_until_complete(client.close())
+                except Exception as error:
+                    self._mark_error(error)
+                loop.close()
 
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
+        self._bot_thread = threading.Thread(target=run_bot, daemon=True)
+        self._bot_thread.start()
 
         self._stop_event.wait()
-        asyncio.run_coroutine_threadsafe(client.close(), loop)
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(client.close(), loop)
+        self._bot_thread.join(timeout=4)
 
 # ---------------------------------------------------------------------------
 # Email / IMAP source
@@ -401,6 +468,7 @@ class EmailSource(Source):
                     self._poll_loop(mail, folders)
 
             except Exception as e:
+                self._mark_error(e)
                 log.error("[email] Error: %s — reconnecting in 30s", e)
                 self._stop_event.wait(30)
             finally:
@@ -425,6 +493,7 @@ class EmailSource(Source):
         mail.select(folder)
         # Mark current state so we only see NEW messages
         self._get_unseen_count(mail)
+        self._mark_ready()
 
         while not self._stop_event.is_set():
             try:
@@ -455,6 +524,7 @@ class EmailSource(Source):
                         self._notify()
 
             except Exception as e:
+                self._mark_error(e)
                 log.error("[email] IDLE error: %s", e)
                 break
 
@@ -464,6 +534,7 @@ class EmailSource(Source):
         for folder in folders:
             mail.select(folder)
             prev_unseen[folder] = self._get_unseen_count(mail)
+        self._mark_ready()
 
         while not self._stop_event.is_set():
             self._stop_event.wait(30)
@@ -484,7 +555,9 @@ class EmailSource(Source):
     @staticmethod
     def _get_unseen_count(mail: imaplib.IMAP4_SSL) -> int:
         typ, data = mail.search(None, "UNSEEN")
-        if typ != "OK" or not data[0]:
+        if typ != "OK":
+            raise RuntimeError("IMAP search failed")
+        if not data or not data[0]:
             return 0
         return len(data[0].split())
 
@@ -509,7 +582,11 @@ class CalendarSource(Source):
                     self._check_ics()
                 elif cal_type == "google":
                     self._check_google()
+                else:
+                    raise ValueError("Unknown calendar type")
+                self._mark_ready()
             except Exception as e:
+                self._mark_error(e)
                 log.error("[calendar] Error: %s", e)
             self._stop_event.wait(poll)
 
@@ -518,7 +595,7 @@ class CalendarSource(Source):
 
         url = self.cfg.get("ics_url", "")
         if not url:
-            return
+            raise ValueError("ICS URL is required")
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
         cal = Calendar.from_ical(resp.content)
@@ -582,8 +659,7 @@ class CalendarSource(Source):
         except ImportError:
             log.error("[calendar] Google Calendar deps not installed. "
                       "Run: pip install google-api-python-client google-auth-oauthlib")
-            self._stop_event.set()
-            return
+            raise
 
         creds_path = self.cfg.get("google_credentials", "")
         token_path = Path(creds_path).parent / "token.json" if creds_path else Path("token.json")
@@ -596,6 +672,8 @@ class CalendarSource(Source):
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(GRequest())
             else:
+                if not self.cfg.get("google_interactive_auth", True):
+                    raise RuntimeError("Google interactive authorization is disabled")
                 flow = InstalledAppFlow.from_client_secrets_file(creds_path, scopes)
                 creds = flow.run_local_server(port=0)
             with open(token_path, "w") as f:
@@ -647,9 +725,12 @@ class SMSSource(Source):
 
     def start(self) -> None:
         # No dedicated thread — the push server calls handle_post directly
+        self._mark_ready()
         log.info("[sms] Registered (push receiver, no dedicated thread)")
 
     def stop(self) -> None:
+        with self._health_lock:
+            self._state = "stopped"
         log.info("[sms] Stopped")
 
     def handle_post(self, data: dict) -> None:
@@ -662,8 +743,37 @@ class SMSSource(Source):
 # Push HTTP server
 # ---------------------------------------------------------------------------
 
+def health_snapshot(sources: list[Source], monitor: DeviceMonitor | None) -> dict:
+    source_health = {src.name: src.health() for src in sources}
+    device = monitor.health() if monitor else {
+        "enabled": False, "worker_alive": False, "online": None,
+        "checked_at": None, "age_seconds": None, "stale": False,
+    }
+    now = time.time()
+    if monitor and device["checked_at"] is not None:
+        device["age_seconds"] = max(0, now - device["checked_at"])
+        device["stale"] = device["age_seconds"] > max(30, 3 * monitor._poll_interval + 3)
+    healthy = bool(source_health) and all(
+        item["worker_alive"] and item["state"] == "ready" for item in source_health.values())
+    if device["enabled"] and (not device["worker_alive"] or device["stale"]):
+        healthy = False
+    return {"service": "holoclock-notify", "schema_version": 1,
+            "generated_at": now, "status": "ok" if healthy else "degraded",
+            "sources": source_health, "device": device}
+
+
 class PushHandler(BaseHTTPRequestHandler):
     sms_source: SMSSource | None = None
+    health_provider = staticmethod(lambda: health_snapshot([], None))
+    timeout = 2
+    max_body_bytes = 16384
+
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionError, TimeoutError):
+            # A disconnected push client must not produce an unhandled traceback.
+            pass
 
     def do_POST(self):
         if self.path == "/sms":
@@ -673,10 +783,13 @@ class PushHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
+            health = self.health_provider()
+            body = json.dumps(health).encode()
+            self.send_response(200 if health["status"] == "ok" else 503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"OK")
+            self.wfile.write(body)
         else:
             self.send_error(404)
 
@@ -684,12 +797,29 @@ class PushHandler(BaseHTTPRequestHandler):
         if not self.sms_source:
             self.send_error(503, "SMS source not configured")
             return
-        content_length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(content_length)
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self.send_error(400, "Invalid Content-Length")
+            return
+        if content_length < 0 or content_length > self.max_body_bytes:
+            self.send_error(413, "Request too large")
+            return
+        if self.headers.get("Transfer-Encoding"):
+            self.send_error(400, "Transfer-Encoding is unsupported")
+            return
+        try:
+            raw = self.rfile.read(content_length)
+        except TimeoutError:
+            self.send_error(408, "Request timeout")
+            return
         try:
             data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             self.send_error(400, "Invalid JSON")
+            return
+        if not isinstance(data, dict) or not isinstance(data.get("body", ""), str):
+            self.send_error(400, "Invalid SMS object")
             return
 
         self.sms_source.handle_post(data)
@@ -702,10 +832,17 @@ class PushHandler(BaseHTTPRequestHandler):
         log.debug("[push] %s", format % args)
 
 
-def start_push_server(port: int, sms_source: SMSSource | None) -> HTTPServer:
-    PushHandler.sms_source = sms_source
-    server = HTTPServer(("0.0.0.0", port), PushHandler)
+def start_push_server(port: int, sms_source: SMSSource | None, health_provider=None,
+                      host: str = "0.0.0.0") -> ThreadingHTTPServer:
+    class Handler(PushHandler):
+        pass
+    Handler.sms_source = sms_source
+    Handler.health_provider = staticmethod(health_provider or (
+        lambda: health_snapshot([sms_source] if sms_source else [], None)))
+    server = ThreadingHTTPServer((host, port), Handler)
     thread = threading.Thread(target=server.serve_forever, name="push-server", daemon=True)
+    if sms_source:
+        sms_source._thread = thread
     thread.start()
     log.info("Push HTTP server listening on :%d", port)
     return server
@@ -770,14 +907,14 @@ def main() -> None:
 
     if not sources:
         log.warning("No sources enabled — nothing to do")
-        return
 
     # Start push server if needed
     push_cfg = config.get("push_server", {})
     push_server = None
     if push_cfg.get("enabled") or sms_source:
         push_port = push_cfg.get("port", 8090)
-        push_server = start_push_server(push_port, sms_source)
+        push_server = start_push_server(push_port, sms_source,
+                                        lambda: health_snapshot(sources, monitor))
 
     # Start all sources
     for src in sources:
@@ -802,6 +939,7 @@ def main() -> None:
         src.stop()
     if push_server:
         push_server.shutdown()
+        push_server.server_close()
     log.info("Goodbye")
 
 

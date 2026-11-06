@@ -1,0 +1,20 @@
+FROM docker.io/library/python:3.13-slim AS runtime
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+COPY deploy/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt \
+    && useradd --uid 1000 --create-home holoclock
+
+FROM runtime AS verify
+WORKDIR /app
+RUN pip install --no-cache-dir pytest==8.4.2
+COPY tools/holoclock_notify.py tools/holoclock_notify.py
+COPY tests/test_notify_health.py tests/test_notify_health.py
+RUN python -m pytest -q -p no:cacheprovider tests/test_notify_health.py
+
+FROM runtime
+COPY --from=verify /app/tools/holoclock_notify.py /app/holoclock_notify.py
+USER 1000:1000
+WORKDIR /state
+EXPOSE 8090
+ENTRYPOINT ["python", "/app/holoclock_notify.py"]
+CMD ["--config", "/state/config.yaml"]
