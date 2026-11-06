@@ -20,7 +20,11 @@ WebServer config_wifi_server(80);
 
 #include "app/picture/picture.h"
 #include "app/watcher/watcher.h"
+#include "app/watcher/ui.h"
+#include "app/watcher/nowplaying.h"
+#include "driver/display.h"
 #include "wificonfig.h"
+#include "ArduinoJson.h"
 
 extern String wifi_config_string;
 
@@ -33,7 +37,49 @@ ImuAction *act_info; // 存放mpu6050返回的数据
 File uploadFile;
 bool isSDCardInserted = false;
 
+// ── Soft Sleep ──
+static bool isSleeping = false;
+static unsigned long wakeCooldownUntil = 0;
+static bool tiltSleepTracking = false;
+static unsigned long tiltSleepStart = 0;
+static unsigned long sleepSettleUntil = 0;
+
+#define SLEEP_WAKE_ACCEL_THRESHOLD 3000  // raw accel units (gravity ~16384 at ±2g)
+#define SLEEP_TILT_THRESHOLD  8000       // side tilt threshold (raw accel units at ±2g)
+#define SLEEP_TILT_HOLD_MS    2000       // hold for 2 seconds to trigger sleep
+#define SLEEP_SETTLE_MS       3000       // ignore wake checks for 3s after entering sleep
+#define SLEEP_IMU_POLL_MS          500
+#define NORMAL_IMU_POLL_MS         200
+#define WAKE_COOLDOWN_MS           5000  // ignore sleep tilt for 5s after wake
+
+#ifndef ST7789_SLPIN
+#define ST7789_SLPIN   0x10
+#define ST7789_SLPOUT  0x11
+#define ST7789_DISPOFF 0x28
+#define ST7789_DISPON  0x29
+#endif
+
 void wifi_init();
+
+// ── WiFi health counters (diagnostics for intermittent drops, /np-debug) ──
+static uint32_t wifiDisconnectCount = 0;
+static uint32_t wifiGotIpCount = 0;
+static int lastWifiDiscReason = 0;
+static unsigned long lastWifiDiscMillis = 0;
+
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+    if (event == SYSTEM_EVENT_STA_DISCONNECTED)
+    {
+        wifiDisconnectCount++;
+        lastWifiDiscReason = info.disconnected.reason;
+        lastWifiDiscMillis = millis();
+    }
+    else if (event == SYSTEM_EVENT_STA_GOT_IP)
+    {
+        wifiGotIpCount++;
+    }
+}
 
 TimerHandle_t xTimerAction = NULL;
 void actionCheckHandle(TimerHandle_t xTimer)
@@ -435,6 +481,207 @@ void handleConfig() {
   }
 }
 
+void handleNpDebug()
+{
+    String np;
+    nowplaying_debug_json(&np);
+    String out = "{\"np\":" + np +
+        ",\"wifi\":{\"status\":" + String((int)WiFi.status()) +
+        ",\"rssi\":" + String(WiFi.RSSI()) +
+        ",\"disconnects\":" + String(wifiDisconnectCount) +
+        ",\"last_disc_reason\":" + String(lastWifiDiscReason) +
+        ",\"last_disc_age_ms\":" + String(lastWifiDiscMillis ? (millis() - lastWifiDiscMillis) : 0) +
+        ",\"got_ip_count\":" + String(wifiGotIpCount) + "}" +
+        ",\"heap\":{\"free\":" + String(ESP.getFreeHeap()) +
+        ",\"min_free\":" + String(ESP.getMinFreeHeap()) +
+        ",\"max_alloc\":" + String(ESP.getMaxAllocHeap()) + "}" +
+        ",\"uptime_ms\":" + String(millis()) + "}";
+    fiber_server.send(200, "application/json", out);
+}
+
+void handleDayBoost()
+{
+    String v = fiber_server.arg("v");
+    if (v == "on")        set_day_boost_override(1);
+    else if (v == "off")  set_day_boost_override(0);
+    else if (v == "auto") set_day_boost_override(-1);
+    else {
+        fiber_server.send(400, "text/plain", "use /day-boost?v=on|off|auto");
+        return;
+    }
+    fiber_server.send(200, "application/json", "{\"day_boost_mode\":\"" + v + "\"}");
+}
+
+void handleTimeDebug()
+{
+    String json;
+    getTimeDebugJson(&json);
+    fiber_server.send(200, "application/json", json);
+}
+
+void handleTimeSync()
+{
+    set_focus_update(1);
+    String json;
+    getTimeDebugJson(&json);
+    fiber_server.send(200, "application/json", json);
+}
+
+void handleNotify()
+{
+    if (fiber_server.method() != HTTP_POST) {
+        fiber_server.send(405, "text/plain", "Method Not Allowed");
+        return;
+    }
+    String body = fiber_server.arg("plain");
+    StaticJsonDocument<128> doc;
+    if (deserializeJson(doc, body)) {
+        fiber_server.send(400, "text/plain", "Invalid JSON");
+        return;
+    }
+    const char* source = doc["source"] | "?";
+    uint32_t color = doc["color"] | (uint32_t)0x7B68EE;
+    uint32_t duration = doc["duration_ms"] | (uint32_t)NOTIFY_DISPLAY_MS;
+    notification_receive(source, color, duration);
+    fiber_server.send(200, "application/json", "{\"status\":\"ok\"}");
+}
+
+///////////////////// DEBUG HTTP HANDLERS ////////////////////
+
+// Temporary diagnostic: scan the I2C bus and raw-read the BH1750 at both
+// candidate addresses (0x23 ADDR=L, 0x5C ADDR=H) to verify the sensor path
+void handleI2CDebug() {
+    String out = "{\"ack\":[";
+    bool first = true;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            if (!first) out += ",";
+            out += "\"0x" + String(addr, HEX) + "\"";
+            first = false;
+        }
+    }
+    out += "],";
+    const uint8_t candidates[2] = {0x23, 0x5C};
+    for (int i = 0; i < 2; i++) {
+        uint8_t a = candidates[i];
+        Wire.beginTransmission(a);
+        Wire.write(0x01);                     // power on
+        uint8_t e1 = Wire.endTransmission();
+        Wire.beginTransmission(a);
+        Wire.write(ONE_TIME_H_RESOLUTION_MODE);
+        uint8_t e2 = Wire.endTransmission();
+        delay(180);                           // max one-time H-res conversion time
+        uint8_t n = Wire.requestFrom((int)a, 2);
+        int hi = Wire.read(), lo = Wire.read();
+        out += "\"addr_0x" + String(a, HEX) + "\":{\"wr_pwr\":" + String(e1) +
+               ",\"wr_mode\":" + String(e2) + ",\"got\":" + String(n) +
+               ",\"hi\":" + String(hi) + ",\"lo\":" + String(lo) + "}";
+        if (i == 0) out += ",";
+    }
+    out += "}";
+    fiber_server.send(200, "application/json", out);
+}
+
+void handleDebugScreen() {
+    int v = fiber_server.arg("v").toInt();
+    if (v) ui_show_debug_screen();
+    else   ui_hide_debug_screen();
+    fiber_server.send(200, "text/plain", v ? "debug ON" : "debug OFF");
+}
+
+void handleRotation() {
+    int v = fiber_server.arg("v").toInt();
+    tft->setRotation(v);
+    lv_obj_invalidate(lv_scr_act());  // force full redraw
+    fiber_server.send(200, "text/plain", "rotation=" + String(v));
+}
+
+void handleDebugGrid() {
+    ui_show_debug_grid();
+    fiber_server.send(200, "text/plain", "debug grid ON");
+}
+
+void handleDebugStatus() {
+    String s = "hw_flip=MADCTL_0xC8\n";
+    fiber_server.send(200, "text/plain", s);
+}
+
+// ── Soft Sleep helpers ──
+
+bool checkWakeMotion() {
+    ImuAction tmp;
+    mpu.getVirtureMotion6(&tmp);
+    return (abs(tmp.v_ax) > SLEEP_WAKE_ACCEL_THRESHOLD ||
+            abs(tmp.v_ay) > SLEEP_WAKE_ACCEL_THRESHOLD);
+}
+
+void enterSleep() {
+    if (isSleeping) return;
+    isSleeping = true;
+    sleepSettleUntil = millis() + SLEEP_SETTLE_MS;
+    Serial.println("Entering soft sleep...");
+
+    // Clear UI state
+    notification_dismiss();
+    depth_parallax_stop();
+
+    // Display off
+    screen.setBackLight(0.0);
+    tft->writecommand(ST7789_DISPOFF);
+    tft->writecommand(ST7789_SLPIN);
+
+    // LEDs off
+    rgb.setBrightness(0).setRGB(0, 0, 0);
+
+    // WiFi off
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+
+    // Slow IMU polling
+    xTimerChangePeriod(xTimerAction, SLEEP_IMU_POLL_MS / portTICK_PERIOD_MS, 0);
+}
+
+void exitSleep() {
+    Serial.println("Waking from soft sleep...");
+
+    // Display on
+    tft->writecommand(ST7789_SLPOUT);
+    delay(120);  // ST7789 requires ≥120ms after SLPOUT
+    tft->writecommand(ST7789_DISPON);
+
+    // Defensive: re-apply MADCTL and rowstart for rotation 4
+    tft->writecommand(0x36);
+    tft->writedata(0x48);  // rotation 4: MX|COLOR_ORDER
+    tft->rowstart = 0;
+
+    screen.setBackLight(0.95);
+
+    // LEDs to idle green
+    rgb.setBrightness(0.1).setRGB(0, 150, 0);
+
+    // Restart LVGL animations
+    depth_parallax_init();
+
+    // Reconnect WiFi
+    wifi_check();
+    set_focus_update(1);  // force NTP resync
+
+    // Restore normal IMU polling
+    xTimerChangePeriod(xTimerAction, NORMAL_IMU_POLL_MS / portTICK_PERIOD_MS, 0);
+
+    wakeCooldownUntil = millis() + WAKE_COOLDOWN_MS;
+    tiltSleepTracking = false;
+    tiltSleepStart = 0;
+    isSleeping = false;
+}
+
+void handleSleep() {
+    fiber_server.send(200, "application/json", "{\"status\":\"sleeping\"}");
+    delay(100);  // allow HTTP response to flush before WiFi goes down
+    enterSleep();
+}
+
 void wifi_config_mode_init()
 {
   
@@ -491,15 +738,14 @@ void setup()
 
     mpu.init(0, 1,&mpu_cfg);
         /*** 以此作为MPU6050初始化完成的标志 ***/
-    RgbConfig *rgb_cfg = &g_rgb_cfg;
+    // RgbConfig *rgb_cfg = &g_rgb_cfg;
     // 初始化RGB灯 HSV色彩模式
-    RgbParam rgb_setting = {LED_MODE_HSV,
-                            rgb_cfg->min_value_0, rgb_cfg->min_value_1, rgb_cfg->min_value_2,
-                            rgb_cfg->max_value_0, rgb_cfg->max_value_1, rgb_cfg->max_value_2,
-                            rgb_cfg->step_0, rgb_cfg->step_1, rgb_cfg->step_2,
-                            rgb_cfg->min_brightness, rgb_cfg->max_brightness,
-                            rgb_cfg->brightness_step, rgb_cfg->time};
-
+    // RgbParam rgb_setting = {LED_MODE_HSV,
+    //                         rgb_cfg->min_value_0, rgb_cfg->min_value_1, rgb_cfg->min_value_2,
+    //                         rgb_cfg->max_value_0, rgb_cfg->max_value_1, rgb_cfg->max_value_2,
+    //                         rgb_cfg->step_0, rgb_cfg->step_1, rgb_cfg->step_2,
+    //                         rgb_cfg->min_brightness, rgb_cfg->max_brightness,
+    //                         rgb_cfg->brightness_step, rgb_cfg->time};
     // rgb_thread_init(&rgb_setting);
 
     act_info = mpu.getAction();
@@ -513,6 +759,7 @@ void setup()
     lv_fs_fatfs_init();
     wifi_current_mode = 1;
     picture_init();
+    WiFi.onEvent(onWiFiEvent);
     wifi_init();
     
     Serial.println("init picture finish");
@@ -526,6 +773,20 @@ void setup()
     returnOK();
   }, fbhandleFileUpload);
 
+    fiber_server.on("/notify", HTTP_POST, handleNotify);
+    fiber_server.on("/time-debug", HTTP_GET, handleTimeDebug);
+    fiber_server.on("/time-sync", HTTP_POST, handleTimeSync);
+
+    // Debug display coordinate space endpoints
+    fiber_server.on("/np-debug", HTTP_GET, handleNpDebug);
+    fiber_server.on("/day-boost", HTTP_GET, handleDayBoost);
+    fiber_server.on("/i2c-debug", HTTP_GET, handleI2CDebug);
+    fiber_server.on("/debug", HTTP_GET, handleDebugScreen);
+    fiber_server.on("/rotation", HTTP_GET, handleRotation);
+    fiber_server.on("/debug-grid", HTTP_GET, handleDebugGrid);
+    fiber_server.on("/dbg-status", HTTP_GET, handleDebugStatus);
+    fiber_server.on("/sleep", HTTP_GET, handleSleep);
+
     fiber_server.begin();
 }
 
@@ -533,6 +794,17 @@ void setup()
 
 void loop()
 {
+    // ── Soft sleep: skip normal operation, just poll IMU for wake ──
+    if (isSleeping) {
+        if (isCheckAction) {
+            isCheckAction = false;
+            if (millis() > sleepSettleUntil && checkWakeMotion())
+                exitSleep();
+        }
+        delay(10);  // yield to RTOS
+        return;
+    }
+
     if(wifi_current_mode)
     {
       fiber_server.handleClient();
@@ -547,13 +819,34 @@ void loop()
         isCheckAction = false;
         act_info = mpu.getAction();
 
-        if(act_info->active==3)
+        // ── Tilt-to-sleep: extreme forward tilt held for 2s ──
+        bool sleepTiltActive = false;
+        Serial.printf("IMU: ax=%d ay=%d act=%d\n", act_info->v_ax, act_info->v_ay, act_info->active);
+        if (millis() > wakeCooldownUntil) {
+            int16_t ay = act_info->v_ay;
+            if (abs(ay) > SLEEP_TILT_THRESHOLD) {
+                if (!tiltSleepTracking) {
+                    tiltSleepTracking = true;
+                    tiltSleepStart = millis();
+                } else if (millis() - tiltSleepStart >= SLEEP_TILT_HOLD_MS) {
+                    tiltSleepTracking = false;
+                    enterSleep();
+                    return;
+                }
+                sleepTiltActive = true;
+            } else {
+                tiltSleepTracking = false;
+            }
+        }
+
+        // Existing GO_FORWORD handler — skip while extreme sleep tilt is active
+        if(!sleepTiltActive && act_info->active==3)
         {
           delay(300);
           if(act_info->active==3)
           {
             //进入配网模式
-            
+
              if(wifi_current_mode)
              {
                 wifi_current_mode = 0;
@@ -576,7 +869,7 @@ void loop()
             {
               wifi_check();
             }
-            
+
           }
         }
 

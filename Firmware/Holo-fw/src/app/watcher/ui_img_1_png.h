@@ -13,6 +13,7 @@
 
 #ifdef THEME_1
 
+// --- Mid layer (HH:MM time) ---
 #define TH1_X -37
 #define TH1_Y -22
 #define TH1_W 65
@@ -23,11 +24,18 @@
 #define TH2_W 68
 #define TH2_H 50
 
+// --- Near layer (seconds / AM-PM) ---
 #define M1_X -5
 #define M1_Y 20
 #define M1_W 48
 #define M1_H 32
 
+#define AMPM_X -5
+#define AMPM_Y 24
+#define AMPM_W 60
+#define AMPM_H 36
+
+// --- Far layer (month + date) ---
 #define MOUTH_X -76
 #define MOUTH_Y -94
 #define MOUTH_W 79
@@ -38,8 +46,31 @@
 #define DATE_Y -93
 #define DATE_W 85
 #define DATE_H 29
-#define DATE_COLOR 0xE2B483
+#define DATE_COLOR 0xF5D8A8
 
+// === DAY-BOOST (bright ambient light) VARIANTS ===
+// Same warm hues raised to ~95% luminance for Pepper's ghost daytime readability
+#define MOUTH_COLOR_DAY 0xFFD9A6
+#define DATE_COLOR_DAY  0xFFEBC8
+// Background star-field opacity while day boost is active (255 = night/normal)
+#define BG_IMG_OPA_DAY  100
+
+// === DEPTH LAYER CONFIGURATION ===
+// Set to 1 to invert depth direction (swap which end is "near" vs "far")
+#define DEPTH_INVERT  0
+
+// Opacity per layer (0-255). Farther = dimmer (atmospheric perspective)
+#define DEPTH_FAR_OPA   255
+#define DEPTH_MID_OPA   255
+#define DEPTH_NEAR_OPA  255
+
+// Parallax float: amplitude (px) and period (ms) per layer
+#define PARALLAX_FAR_AMP      1
+#define PARALLAX_FAR_PERIOD   8000
+#define PARALLAX_MID_AMP      2
+#define PARALLAX_MID_PERIOD   6000
+#define PARALLAX_NEAR_AMP     3
+#define PARALLAX_NEAR_PERIOD  4000
 
 #ifndef LV_ATTRIBUTE_MEM_ALIGN
 #define LV_ATTRIBUTE_MEM_ALIGN
