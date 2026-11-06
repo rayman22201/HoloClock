@@ -21,7 +21,6 @@ WebServer config_wifi_server(80);
 #include "app/picture/picture.h"
 #include "app/watcher/watcher.h"
 #include "app/watcher/ui.h"
-#include "app/watcher/nowplaying.h"
 #include "driver/display.h"
 #include "wificonfig.h"
 #include "ArduinoJson.h"
@@ -483,8 +482,7 @@ void handleConfig() {
 
 void handleNpDebug()
 {
-    String np;
-    nowplaying_debug_json(&np);
+    String np = "{\"enabled\":false}";
     String out = "{\"np\":" + np +
         ",\"wifi\":{\"status\":" + String((int)WiFi.status()) +
         ",\"rssi\":" + String(WiFi.RSSI()) +

@@ -1,6 +1,5 @@
 #include "watcher.h"
 #include "ui.h"
-#include "nowplaying.h"
 #include "network.h"
 #include "common.h"
 #define ARDUINOJSON_USE_LONG_LONG 1
@@ -424,6 +423,5 @@ void update_time_status()
     brightness_poll();
     display_space();
     notification_check_display();
-    nowplaying_poll();
     delay(100);
 }

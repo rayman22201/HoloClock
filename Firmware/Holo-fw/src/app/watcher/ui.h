@@ -46,8 +46,7 @@ struct NotificationData {
 extern void ui_change_sec(int);
 extern void ui_change_min(int mins);
 extern void ui_change_h(int h, bool is_pm);
-extern void ui_change_day(int day, int week);
-extern void ui_chagne_mouth(int mouth);
+extern void ui_change_date(int month, int day, int week);
 
 extern void ui_init(void);
 extern void ui_release();

@@ -7,7 +7,7 @@
 #include "ui_helpers.h"
 #include "Arduino.h"
 #include "common.h"
-#include "nowplaying.h"
+LV_FONT_DECLARE(clock_digits_56);
 
 #define THEME_1
 #define SPACE_60
@@ -54,8 +54,7 @@ void ui_release();
 void ui_change_sec(int);
 void ui_change_min(int mins);
 void ui_change_h(int h, bool is_pm);
-void ui_change_day(int day, int week);
-void ui_chagne_mouth(int mouth);
+void ui_change_date(int month, int day, int week);
 void display_space();
 void depth_parallax_init(void);
 void depth_parallax_stop(void);
@@ -114,7 +113,6 @@ void depth_parallax_init(void) {
     // Near layer: AM/PM + spaceImg
     start_float_anim(ui_LabelAmPm, AMPM_Y, _NEAR_AMP, _NEAR_PER);
     start_float_anim(spaceImg, spaceImg_base_y, _NEAR_AMP, _NEAR_PER);
-    nowplaying_parallax_start(TICKER_Y, _NEAR_AMP, _NEAR_PER);
 
     g_parallax_active = true;
 
@@ -134,7 +132,6 @@ void depth_parallax_stop(void) {
     lv_anim_del(ui_TH2, float_y_cb);
     lv_anim_del(ui_LabelAmPm, float_y_cb);
     if (spaceImg != NULL) lv_anim_del(spaceImg, float_y_cb);
-    nowplaying_parallax_stop();
 
     g_parallax_active = false;
 }
@@ -198,11 +195,11 @@ void ui_Screen_screen_init(void)
     lv_obj_set_x(ui_LabelMouth, MOUTH_X);
     lv_obj_set_y(ui_LabelMouth, MOUTH_Y);
     lv_obj_set_align(ui_LabelMouth, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_LabelMouth, "May");
+    lv_label_set_text(ui_LabelMouth, "May 20");
     lv_obj_set_style_text_color(ui_LabelMouth, lv_color_hex(MOUTH_COLOR), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_LabelMouth, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_align(ui_LabelMouth, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(ui_LabelMouth, &lv_font_montserrat_32, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_align(ui_LabelMouth, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_LabelMouth, &lv_font_montserrat_36, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_LabelDate = lv_label_create(ui_Screen);
     lv_obj_set_width(ui_LabelDate, DATE_W);
@@ -210,11 +207,11 @@ void ui_Screen_screen_init(void)
     lv_obj_set_x(ui_LabelDate, DATE_X);
     lv_obj_set_y(ui_LabelDate, DATE_Y);
     lv_obj_set_align(ui_LabelDate, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_LabelDate, "20");
+    lv_label_set_text(ui_LabelDate, "Wed");
     lv_obj_set_style_text_color(ui_LabelDate, lv_color_hex(DATE_COLOR), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_LabelDate, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_align(ui_LabelDate, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(ui_LabelDate, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_align(ui_LabelDate, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_LabelDate, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     // AM/PM label
     ui_LabelAmPm = lv_label_create(ui_Screen);
@@ -233,8 +230,8 @@ void ui_Screen_screen_init(void)
     lv_img_set_src(spaceImg, manImage_map[0]);
 
 #ifdef THEME_1
-    lv_obj_set_style_text_font(ui_TH1, &lv_font_montserrat_48, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(ui_TH2, &lv_font_montserrat_48, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_TH1, &clock_digits_56, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_TH2, &clock_digits_56, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_M1, &lv_font_montserrat_30, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_align(spaceImg, LV_ALIGN_CENTER, 105, 10);
 #endif
@@ -261,7 +258,6 @@ void ui_Screen_screen_init(void)
     // spaceImg alignment offset from lv_obj_align(spaceImg, LV_ALIGN_CENTER, 105, 10)
     spaceImg_base_y = 10;
 
-    nowplaying_create(ui_Screen);
 }
 
 void display_space(void)
@@ -302,8 +298,7 @@ void display_time(struct TimeStr timeInfo, lv_scr_load_anim_t anim_type)
     ui_change_sec(timeInfo.second);
     ui_change_min(timeInfo.minute);
     ui_change_h(timeInfo.hour, timeInfo.is_pm);
-    ui_change_day(timeInfo.day, timeInfo.weekday);
-    ui_chagne_mouth(timeInfo.month);
+    ui_change_date(timeInfo.month, timeInfo.day, timeInfo.weekday);
 }
 
 void ui_init(void)
@@ -343,7 +338,6 @@ void ui_release()
     g_notification_visible = false;
     g_notification.pending = false;
 
-    nowplaying_destroy();
 
     if (NULL != ui_Screen)
     {
@@ -391,14 +385,10 @@ void ui_change_h(int h, bool is_pm)
     }
 }
 
-void ui_change_day(int day, int week)
+void ui_change_date(int month, int day, int week)
 {
-    lv_label_set_text_fmt(ui_LabelDate, "%d %s", day, weekDayCh[week]);
-}
-
-void ui_chagne_mouth(int mouth)
-{
-    lv_label_set_text(ui_LabelMouth, mouthCh[mouth-1]);
+    lv_label_set_text_fmt(ui_LabelMouth, "%s %d", mouthCh[month-1], day);
+    lv_label_set_text(ui_LabelDate, weekDayCh[week]);
 }
 
 ///////////////////// NOTIFICATION SYSTEM ////////////////////

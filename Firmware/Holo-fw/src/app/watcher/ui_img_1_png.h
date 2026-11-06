@@ -14,15 +14,15 @@
 #ifdef THEME_1
 
 // --- Mid layer (HH:MM time) ---
-#define TH1_X -37
-#define TH1_Y -22
-#define TH1_W 65
-#define TH1_H 50
+#define TH1_X -42
+#define TH1_Y -14
+#define TH1_W 78
+#define TH1_H 56
 
-#define TH2_X 23
-#define TH2_Y -22
-#define TH2_W 68
-#define TH2_H 50
+#define TH2_X 32
+#define TH2_Y -14
+#define TH2_W 78
+#define TH2_H 56
 
 // --- Near layer (seconds / AM-PM) ---
 #define M1_X -5
@@ -31,21 +31,21 @@
 #define M1_H 32
 
 #define AMPM_X -5
-#define AMPM_Y 24
+#define AMPM_Y 46
 #define AMPM_W 60
 #define AMPM_H 36
 
 // --- Far layer (month + date) ---
-#define MOUTH_X -76
-#define MOUTH_Y -94
-#define MOUTH_W 79
-#define MOUTH_H 40
+#define MOUTH_X -46
+#define MOUTH_Y -84
+#define MOUTH_W 144
+#define MOUTH_H 44
 #define MOUTH_COLOR 0xE2B483
 
-#define DATE_X 73
-#define DATE_Y -93
-#define DATE_W 85
-#define DATE_H 29
+#define DATE_X 82
+#define DATE_Y -84
+#define DATE_W 72
+#define DATE_H 36
 #define DATE_COLOR 0xF5D8A8
 
 // === DAY-BOOST (bright ambient light) VARIANTS ===
