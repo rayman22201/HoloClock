@@ -12,6 +12,7 @@ Usage:
 import argparse
 import imaplib
 import json
+import re
 import select
 import logging
 import signal
@@ -219,6 +220,7 @@ class SlackSource(Source):
         super().__init__(cfg, dispatcher)
         self._channel_id_map: dict[str, str] = {}
         self._user_id: str = ""
+        self._bot_id: str = ""
 
         # Mention filtering
         self._notify_mentions: bool = cfg.get("notify_mentions", True)
@@ -258,7 +260,9 @@ class SlackSource(Source):
         """Check if text contains @here, @everyone, @channel, or @user."""
         if "<!here>" in text or "<!everyone>" in text or "<!channel>" in text:
             return True
-        if self._user_id and f"<@{self._user_id}>" in text:
+        if self._user_id and re.search(
+            rf"<@{re.escape(self._user_id)}(?:\|[^<>|\r\n]+)?>", text
+        ):
             return True
         return False
 
@@ -311,7 +315,7 @@ class SlackSource(Source):
         if req.type != "events_api":
             return
         event = req.payload.get("event", {})
-        if event.get("type") != "message" or event.get("subtype"):
+        if event.get("type") != "message" or event.get("subtype") not in (None, "", "bot_message"):
             return
 
         # Channel filter
@@ -321,6 +325,8 @@ class SlackSource(Source):
 
         # Skip own messages
         if self._user_id and event.get("user") == self._user_id:
+            return
+        if self._bot_id and event.get("bot_id") == self._bot_id:
             return
 
         text = event.get("text", "")
@@ -344,7 +350,9 @@ class SlackSource(Source):
 
         # Fetch authenticated user ID for mention matching
         try:
-            self._user_id = web_client.auth_test()["user_id"]
+            identity = web_client.auth_test()
+            self._user_id = identity["user_id"]
+            self._bot_id = identity.get("bot_id") or ""
             log.info("[slack] Authenticated as user %s", self._user_id)
         except Exception as e:
             log.warning("[slack] Could not fetch user ID: %s", e)

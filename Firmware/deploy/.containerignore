@@ -6,3 +6,4 @@
 !tools/holoclock_notify.py
 !tests/
 !tests/test_notify_health.py
+!tests/test_slack_notifications.py

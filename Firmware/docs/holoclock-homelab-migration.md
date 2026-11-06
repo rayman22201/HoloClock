@@ -134,3 +134,43 @@ and running Ubuntu WSL had no matching notification daemon process.
 These observations do not verify actual provider-event delivery, a server reboot,
 or a completed backup/restore. Earlier recurrence,
 calendar delivery-dedup, and Slack filtering findings remain out of scope.
+
+### Slack DM follow-up, 2026-11-06
+
+A user-reported bot reminder used the alias mention form `<@ID|label>` in a DM.
+The running credential authenticates as the intended human user, not a bot.
+Its granted scopes omit im:history; reading the reported DM with that credential
+returned missing_scope, needed im:history. Slack's connected chat integration
+could read the message, but that is a different authorization from the daemon.
+The daemon and clock were healthy, with no Slack dispatches in the preceding
+30-minute log window. The daemon does not record incoming event bodies, so
+these observations do not establish receipt of that specific Socket Mode event.
+
+Two offline code failures were reproduced: alias-form mentions did not match,
+and bot_message subtype events were always discarded. A narrow local fix now
+matches the exact target ID in canonical and alias forms, permits bot_message,
+and retains edit/delete/own-message filtering. Optional own-bot identity is also
+retained from auth_test. Wrong IDs, ID prefixes, malformed mentions, cooldown,
+and spike behavior have negative/regression controls.
+
+- Red: 7 failed / 13 passed before the fix.
+- Green: 31 Slack and health tests passed on Windows and in the Linux image.
+- Source SHA256: 9b5b5eceb98e5110a75d787a81d85eb6035f467caa9a48834e7f688b1c7793d7.
+- Staged image: localhost/holoclock-notify:20261106-slack-v1,
+  ID 1cc0b01c3a7cf4db74f6534510996fbfa857778ea598dbe51a2c57939b08f09e.
+
+Deployed with user authorization at 2026-11-06 22:49:31 UTC. The authoritative
+homelab Quadlet and live Quadlet now select the staged image above. Only
+holoclock.service was restarted; systemd reports active/running and the running
+container image ID matches. HTTP /health reports all five workers ready and the
+clock online. Independent local validation repeated all 31 tests successfully.
+The previous Quadlet is retained on the server as
+~/.config/containers/systemd/holoclock.container.pre-slack-20261106 for rollback.
+
+Slack DM delivery remains blocked pending admin approval of user OAuth scope
+im:history. Ensure message.im is subscribed under user events, then reauthorize.
+Browser access was unavailable, so app settings were not inspected or changed;
+subscription presence is unverified. Stage credentials privately if Slack rotates
+the user token; do not paste tokens into chat. Provider readiness and synthetic
+handler tests do not prove live Slack delivery or physical rendering. A new
+external qualifying event and physical observation remain required.

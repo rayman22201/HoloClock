@@ -9,7 +9,8 @@ WORKDIR /app
 RUN pip install --no-cache-dir pytest==8.4.2
 COPY tools/holoclock_notify.py tools/holoclock_notify.py
 COPY tests/test_notify_health.py tests/test_notify_health.py
-RUN python -m pytest -q -p no:cacheprovider tests/test_notify_health.py
+COPY tests/test_slack_notifications.py tests/test_slack_notifications.py
+RUN python -m pytest -q -p no:cacheprovider tests
 
 FROM runtime
 COPY --from=verify /app/tools/holoclock_notify.py /app/holoclock_notify.py
